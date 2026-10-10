@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>票券快速掃描累加器</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tesseract.js (OCR) -->
+    <script src="https://unpkg.com/tesseract.js@v4.1.1/dist/tesseract.min.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f3f4f6;
+            margin: 0;
+            padding: 0;
+            overscroll-behavior-y: none; /* 防止手機下拉更新干擾 */
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            height: 300px;
+            background-color: #000;
+            overflow: hidden;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .scan-line {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background-color: #10b981; /* Tailwind emerald-500 */
+            box-shadow: 0 0 10px #10b981;
+            animation: scan 2s infinite linear;
+            display: none;
+        }
+        .scanning .scan-line {
+            display: block;
+        }
+        @keyframes scan {
+            0% { top: 0%; }
+            50% { top: 100%; }
+            100% { top: 0%; }
+        }
+        /* 隱藏捲軸但可滾動 */
+        .hide-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .hide-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        /* 新增：成功掃描的閃爍特效 */
+        @keyframes flash-success {
+            0% { background-color: #10b981; opacity: 0.5; }
+            100% { background-color: transparent; opacity: 1; }
+        }
+        .flash-active {
+            animation: flash-success 0.4s ease-out;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // 圖示組件
+        const CameraIcon = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+        );
+
+        const TrashIcon = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+        );
+
+        const App = () => {
+            const [totalAmount, setTotalAmount] = useState(0);
+            const [scannedItems, setScannedItems] = useState([]);
+            const [isScanning, setIsScanning] = useState(false);
+            const [cameraActive, setCameraActive] = useState(false);
+            const [statusMsg, setStatusMsg] = useState('系統初始化中...');
+            
+            // 雙重辨識狀態
+            const [candidates, setCandidates] = useState({ tickets: [], amounts: [] });
+            const [selected, setSelected] = useState({ ticket: null, amount: null });
+            
+            const [manualTicket, setManualTicket] = useState('');
+            const [manualAmount, setManualAmount] = useState('');
+            
+            const [flash, setFlash] = useState(false); // 成功特效
+            const [ocrWorker, setOcrWorker] = useState(null); // 常駐 OCR 引擎
+            
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const streamRef = useRef(null);
+
+            // 初始化極速 OCR 引擎
+            useEffect(() => {
+                let worker;
+                const initTesseract = async () => {
+                    try {
+                        setStatusMsg('正在載入高速辨識引擎...');
+                        worker = await Tesseract.createWorker({
+                            logger: m => {
+                                if(m.status === 'loading tesseract core') setStatusMsg('載入核心引擎...');
+                            }
+                        });
+                        // 為了極速，只載入英文模型，且限制只辨識數字與 $ 符號
+                        await worker.loadLanguage('eng');
+                        await worker.initialize('eng');
+                        await worker.setParameters({
+                            tessedit_char_whitelist: '0123456789$',
+                        });
+                        setOcrWorker(worker);
+                        setStatusMsg('準備就緒！請將票號與金額對準畫面');
+                    } catch (e) {
+                        console.error(e);
+                        setStatusMsg('引擎載入失敗，請重新整理頁面');
+                    }
+                };
+                
+                initTesseract();
+                startCamera();
+
+                return () => {
+                    if(worker) worker.terminate();
+                    stopCamera();
+                };
+            }, []);
+
+            const startCamera = async () => {
+                try {
+                    const constraints = {
+                        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+                    };
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        videoRef.current.onloadedmetadata = () => {
+                            videoRef.current.play();
+                            setCameraActive(true);
+                        };
+                    }
+                    streamRef.current = stream;
+                } catch (err) {
+                    console.error("相機啟動失敗:", err);
+                    setStatusMsg('無法啟動相機，請確認權限。');
+                }
+            };
+
+            const stopCamera = () => {
+                if (streamRef.current) {
+                    streamRef.current.getTracks().forEach(track => track.stop());
+                    streamRef.current = null;
+                }
+                setCameraActive(false);
+            };
+
+            const captureAndScan = async () => {
+                if (!videoRef.current || !cameraActive || !ocrWorker) return;
+
+                setIsScanning(true);
+                setStatusMsg('極速辨識中...');
+                setCandidates({ tickets: [], amounts: [] });
+                setSelected({ ticket: null, amount: null });
+
+                const video = videoRef.current;
+                const canvas = canvasRef.current;
+                // 稍微縮小畫面以提升 OCR 速度，但不影響數字辨識
+                canvas.width = 800; 
+                canvas.height = (video.videoHeight / video.videoWidth) * 800;
+                const ctx = canvas.getContext('2d');
+                
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+
+                try {
+                    // 使用常駐 Worker，這步通常在 0.2~0.5 秒內完成
+                    const result = await ocrWorker.recognize(imageData);
+                    const text = result.data.text;
+                    console.log("OCR 原始辨識:", text);
+                    parseOCRData(text);
+                } catch (error) {
+                    console.error("OCR 錯誤:", error);
+                    setStatusMsg('辨識失敗，請重試');
+                    setIsScanning(false);
+                }
+            };
+
+            const parseOCRData = (text) => {
+                const cleanText = text.replace(/,/g, ''); 
+                const tokens = cleanText.split(/\s+/).filter(t => t);
+                
+                let foundTickets = new Set();
+                let foundAmounts = new Set();
+                
+                tokens.forEach(t => {
+                    const hasDollar = t.includes('$');
+                    const numStr = t.replace(/[^0-9]/g, '');
+                    if (!numStr) return;
+                    
+                    const num = parseInt(numStr, 10);
+                    
+                    // 分類邏輯：
+                    // 1. 有 $ 記號 -> 絕對是金額
+                    // 2. 數字長度 <= 3 (例如 05, 72, 123) -> 視為票號
+                    // 3. 數字長度 > 3 或 數值 >= 100 -> 視為金額
+                    if (hasDollar) {
+                        foundAmounts.add(num);
+                    } else if (numStr.length <= 3 && num < 1000) {
+                        // 保留原始字串以保留開頭的 0 (如 "05")
+                        foundTickets.add(numStr);
+                    } else if (num >= 100) {
+                        foundAmounts.add(num);
+                    }
+                });
+
+                const tickets = Array.from(foundTickets);
+                const amounts = Array.from(foundAmounts).sort((a,b)=>b-a);
+
+                if (tickets.length === 1 && amounts.length === 1) {
+                    // 【極速模式】完美辨識，直接自動加入！
+                    handleAddRecord(tickets[0], amounts[0]);
+                } else if (tickets.length > 0 || amounts.length > 0) {
+                    // 【重疊模式】畫面太亂，請使用者手動點擊配對
+                    setCandidates({ tickets, amounts });
+                    setStatusMsg('偵測到多組數據，請依序點選【票號】與【金額】');
+                    setIsScanning(false);
+                } else {
+                    setStatusMsg('找不到清晰的票號與金額，請重拍或手動輸入');
+                    setIsScanning(false);
+                }
+            };
+
+            const handleCandidateSelect = (type, val) => {
+                setSelected(prev => {
+                    const next = { ...prev, [type]: val };
+                    // 當票號與金額都被選中時，自動加入
+                    if (next.ticket && next.amount) {
+                        handleAddRecord(next.ticket, next.amount);
+                        return { ticket: null, amount: null };
+                    }
+                    return next;
+                });
+            };
+
+            const handleAddRecord = (ticket, amount) => {
+                const amtNum = parseInt(amount, 10);
+                if(isNaN(amtNum) || amtNum <= 0) return;
+                
+                // 檢查是否重複掃描 (防呆機制)
+                const isDuplicate = scannedItems.some(item => item.ticket === ticket);
+                
+                const newItem = {
+                    id: Date.now(),
+                    ticket: ticket || '無票號',
+                    amount: amtNum,
+                    timestamp: new Date().toLocaleTimeString('zh-TW', { hour12: false })
+                };
+                
+                setScannedItems(prev => [newItem, ...prev]);
+                setTotalAmount(prev => prev + newItem.amount);
+                
+                // 重置狀態以利下一次極速掃描
+                setCandidates({ tickets: [], amounts: [] });
+                setSelected({ ticket: null, amount: null });
+                setManualTicket('');
+                setManualAmount('');
+                setIsScanning(false);
+                
+                // 成功特效與訊息
+                triggerFlash();
+                if (isDuplicate) {
+                    setStatusMsg(`⚠️ 注意：票號 ${ticket} 似乎重複了，但已加入。請掃下一張！`);
+                } else {
+                    setStatusMsg(`✅ 成功加入票號 ${ticket} ($${amtNum})，請掃下一張！`);
+                }
+            };
+
+            const triggerFlash = () => {
+                setFlash(true);
+                setTimeout(() => setFlash(false), 400);
+            };
+
+            const handleManualSubmit = (e) => {
+                e.preventDefault();
+                if(manualAmount) {
+                    handleAddRecord(manualTicket || '手動', manualAmount);
+                }
+            };
+
+            const handleDelete = (id, amount) => {
+                setScannedItems(prev => prev.filter(item => item.id !== id));
+                setTotalAmount(prev => prev - amount);
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col max-w-md mx-auto bg-white shadow-xl">
+                    {/* Header: 顯示總計 */}
+                    <div className={`bg-blue-600 text-white p-6 rounded-b-3xl shadow-lg z-10 sticky top-0 transition-colors ${flash ? 'flash-active bg-emerald-500' : ''}`}>
+                        <h1 className="text-sm font-semibold opacity-80 mb-1">目前累計金額</h1>
+                        <div className="flex items-baseline space-x-2">
+                            <span className="text-2xl font-bold">NT$</span>
+                            <span className="text-5xl font-extrabold tracking-tight">
+                                {totalAmount.toLocaleString()}
+                            </span>
+                        </div>
+                        <p className="text-sm mt-2 opacity-90 font-medium">{statusMsg}</p>
+                    </div>
+
+                    <div className="flex-1 p-4 flex flex-col space-y-4 overflow-y-auto hide-scrollbar">
+                        {/* Camera Viewfinder */}
+                        <div className={`video-container ${isScanning ? 'scanning' : ''}`}>
+                            <video ref={videoRef} playsInline muted></video>
+                            <div className="scan-line"></div>
+                            {!cameraActive && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white text-sm">
+                                    <p>相機啟動中...</p>
+                                </div>
+                            )}
+                            <canvas ref={canvasRef} className="hidden"></canvas>
+                        </div>
+
+                        {/* Scan Control */}
+                        <div className="flex space-x-3">
+                            <button 
+                                onClick={captureAndScan}
+                                disabled={isScanning || !cameraActive || !ocrWorker}
+                                className={`flex-1 flex justify-center items-center py-5 rounded-2xl font-bold text-xl shadow-lg transition-transform transform active:scale-95 
+                                    ${(isScanning || !ocrWorker)
+                                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                                        : 'bg-emerald-500 text-white hover:bg-emerald-600'}`}
+                            >
+                                {isScanning ? (
+                                    <span>辨識中...</span>
+                                ) : (
+                                    <>
+                                        <CameraIcon />
+                                        <span className="ml-2">連拍掃描</span>
+                                    </>
+                                )}
+                            </button>
+                        </div>
+
+                        {/* Candidates 智慧配對區 (當抓到多組數字時顯示) */}
+                        {(candidates.tickets.length > 0 || candidates.amounts.length > 0) && (
+                            <div className="bg-indigo-50 border-2 border-indigo-200 rounded-xl p-4 shadow-sm animate-fade-in">
+                                <h3 className="text-sm font-bold text-indigo-800 mb-3 text-center">請點擊配對：1.選票號 👉 2.選金額</h3>
+                                
+                                <div className="grid grid-cols-2 gap-4">
+                                    {/* 票號區 */}
+                                    <div>
+                                        <p className="text-xs text-gray-500 mb-2 font-bold">可選票號：</p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {candidates.tickets.map((t, idx) => (
+                                                <button 
+                                                    key={idx} onClick={() => handleCandidateSelect('ticket', t)}
+                                                    className={`font-bold py-2 px-3 rounded-lg shadow-sm transition-all
+                                                        ${selected.ticket === t ? 'bg-indigo-600 text-white' : 'bg-white border-2 border-indigo-300 text-indigo-700'}`}
+                                                >
+                                                    {t}
+                                                </button>
+                                            ))}
+                                            {candidates.tickets.length === 0 && <span className="text-sm text-gray-400">未掃到短票號</span>}
+                                        </div>
+                                    </div>
+
+                                    {/* 金額區 */}
+                                    <div>
+                                        <p className="text-xs text-gray-500 mb-2 font-bold">可選金額：</p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {candidates.amounts.map((a, idx) => (
+                                                <button 
+                                                    key={idx} onClick={() => handleCandidateSelect('amount', a)}
+                                                    className={`font-bold py-2 px-3 rounded-lg shadow-sm transition-all
+                                                        ${selected.amount === a ? 'bg-amber-600 text-white' : 'bg-white border-2 border-amber-400 text-amber-700'}`}
+                                                >
+                                                    ${a.toLocaleString()}
+                                                </button>
+                                            ))}
+                                            {candidates.amounts.length === 0 && <span className="text-sm text-gray-400">未掃到大金額</span>}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Manual Entry Fallback */}
+                        <form onSubmit={handleManualSubmit} className="flex space-x-2 mt-2 bg-gray-50 p-2 rounded-xl">
+                            <input 
+                                type="text" 
+                                value={manualTicket}
+                                onChange={(e) => setManualTicket(e.target.value)}
+                                placeholder="票號"
+                                className="w-1/3 px-3 py-3 bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-center"
+                            />
+                            <input 
+                                type="number" 
+                                value={manualAmount}
+                                onChange={(e) => setManualAmount(e.target.value)}
+                                placeholder="金額 $"
+                                className="flex-1 px-3 py-3 bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                            />
+                            <button 
+                                type="submit"
+                                disabled={!manualAmount}
+                                className="px-4 py-3 bg-gray-800 text-white font-bold rounded-lg disabled:opacity-50 active:scale-95"
+                            >
+                                手動
+                            </button>
+                        </form>
+
+                        {/* History List */}
+                        <div className="mt-2 pb-10">
+                            <h2 className="text-gray-500 font-bold mb-3 flex justify-between items-end">
+                                <span>掃描紀錄 ({scannedItems.length})</span>
+                            </h2>
+                            
+                            {scannedItems.length === 0 ? (
+                                <div className="text-center py-8 text-gray-400 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                                    開始掃描您的第一張票券
+                                </div>
+                            ) : (
+                                <ul className="space-y-2">
+                                    {scannedItems.map((item) => (
+                                        <li key={item.id} className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border-l-4 border-emerald-500 animate-slide-up">
+                                            <div className="flex items-center space-x-4">
+                                                <div className="bg-gray-100 text-gray-600 font-bold px-3 py-1 rounded-md text-lg">
+                                                    #{item.ticket}
+                                                </div>
+                                                <div>
+                                                    <span className="block font-black text-gray-800 text-xl">${item.amount.toLocaleString()}</span>
+                                                    <span className="text-xs text-gray-400">{item.timestamp}</span>
+                                                </div>
+                                            </div>
+                                            <button 
+                                                onClick={() => handleDelete(item.id, item.amount)}
+                                                className="p-2 hover:bg-red-50 rounded-full transition-colors"
+                                            >
+                                                <TrashIcon />
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const style = document.createElement('style');
+        style.innerHTML = `
+            @keyframes slide-up {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .animate-slide-up {
+                animation: slide-up 0.3s ease-out forwards;
+            }
+            @keyframes fade-in {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+            .animate-fade-in {
+                animation: fade-in 0.2s ease-out forwards;
+            }
+        `;
+        document.head.appendChild(style);
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
