@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>票券快速掃描累加器 (QR定位極速版)</title>
+<title>票券快速掃描累加器 (QR定位精準版)</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -222,7 +222,7 @@ function App() {
     }
 
     if (isAutoScanMode) {
-      setStatusMsg('連拍中：等待金額進入右上角綠框...');
+      setStatusMsg('連拍中：等待金額完全進入右上角綠框...');
       setIsScanning(false);
       return;
     }
@@ -331,19 +331,19 @@ function App() {
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center bg-black/40">
                 <div className="relative w-[320px] h-[240px]">
                   
-                  {/* 正下方的 QR Code 提示框 (已修正位置至 left-1/2 居中對齊) */}
+                  {/* 正下方的 QR Code 提示框 */}
                   <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-28 h-28 border-2 border-gray-400 border-dashed rounded flex flex-col items-center justify-center opacity-70">
                     <span className="text-gray-300 font-bold text-sm">對準</span>
                     <span className="text-gray-300 font-bold text-sm">QR Code</span>
                   </div>
 
-                  {/* 右上方的「總金額」精確擷取框 (僅裁切此處) */}
+                  {/* 右上方的「總金額」精確擷取框 - 已大幅縮小寬度避免中文 */}
                   <div 
                     ref={targetBoxRef}
-                    className="absolute top-4 right-4 w-40 h-16 border-4 border-emerald-400 rounded-lg bg-emerald-500/10 flex items-center justify-center overflow-hidden"
+                    className="absolute top-4 right-4 w-28 h-12 border-4 border-emerald-400 rounded-lg bg-emerald-500/10 flex items-center justify-center overflow-hidden"
                   >
                     {isScanning && <div className="scan-line"></div>}
-                    <span className="absolute -top-6 text-emerald-300 text-xs font-bold bg-black/60 px-2 py-0.5 rounded">總金額 $</span>
+                    <span className="absolute -top-6 text-emerald-300 text-xs font-bold bg-black/60 px-2 py-0.5 rounded">將 $ 與數字放入此框</span>
                   </div>
 
                 </div>
