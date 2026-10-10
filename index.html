@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>票券快速掃描累加器 (純金額極速版)</title>
+<title>票券快速掃描累加器 (極速裁切版)</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -14,15 +14,15 @@
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#f3f4f6; margin:0; overscroll-behavior-y:none; }
   .video-container { position:relative; width:100%; height:100%; background:#000; overflow:hidden; }
   video { width:100%; height:100%; object-fit:contain; }
-  .scan-line { position:absolute; top:0; left:0; width:100%; height:2px; background:#10b981; box-shadow:0 0 10px #10b981; animation:scan 1.5s infinite linear; display:none; pointer-events:none; }
+  .scan-line { position:absolute; top:0; left:0; width:100%; height:2px; background:#10b981; box-shadow:0 0 10px #10b981; animation:scan 1s infinite linear; display:none; pointer-events:none; }
   .scanning .scan-line { display:block; }
-  @keyframes scan { 0%{top:0} 50%{top:100%} 100%{top:0} }
+  @keyframes scan { 0%{top:33%} 50%{top:66%} 100%{top:33%} }
   .hide-scrollbar::-webkit-scrollbar { display:none; }
   .hide-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
   @keyframes flash-success { 0%{background-color:#10b981;opacity:.5} 100%{background-color:transparent;opacity:1} }
-  .flash-active { animation:flash-success .4s ease-out; }
+  .flash-active { animation:flash-success .3s ease-out; }
   @keyframes slide-up { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
-  .animate-slide-up { animation:slide-up .3s ease-out forwards; }
+  .animate-slide-up { animation:slide-up .2s ease-out forwards; }
 </style>
 </head>
 <body>
@@ -41,20 +41,23 @@ const TrashIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
   </svg>
 );
+const EditIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-500 inline-block ml-1 opacity-70" viewBox="0 0 20 20" fill="currentColor">
+    <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+  </svg>
+);
 
 function App() {
   const [scannedItems, setScannedItems] = useState([]);
   const [isScanning, setIsScanning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
-  const [statusMsg, setStatusMsg] = useState('正在載入 OCR 引擎...');
-  const [candidates, setCandidates] = useState([]); // 只存金額
+  const [statusMsg, setStatusMsg] = useState('正在載入極速 OCR 引擎...');
   const [manualAmount, setManualAmount] = useState('');
   const [sessionActive, setSessionActive] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('現金');
   const [flash, setFlash] = useState(false);
   const [ocrWorker, setOcrWorker] = useState(null);
   
-  // 自動連拍狀態
   const [isAutoScanMode, setIsAutoScanMode] = useState(false);
 
   const videoRef = useRef(null);
@@ -71,21 +74,18 @@ function App() {
   
   const currentSessionItems = scannedItems.filter(item => item.payMethod === paymentMethod);
 
+  // 初始化 Tesseract
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const worker = await Tesseract.createWorker({
-          logger: m => {
-            if (!mounted) return;
-            if (m.status === 'recognizing text') setStatusMsg(`正在辨識 ${(m.progress * 100).toFixed(0)}%`);
-          }
-        });
+        const worker = await Tesseract.createWorker();
         await worker.loadLanguage('eng');
         await worker.initialize('eng');
+        // 極速設定：只允許數字與 $，並設定辨識模式為單一區塊
         await worker.setParameters({
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$,:.-#',
-          preserve_interword_spaces: '1'
+          tessedit_char_whitelist: '$S5s0123456789, ', 
+          tessedit_pageseg_mode: '6' // PSM 6: 假設為單一文字區塊，大幅提升速度
         });
         if (!mounted) {
           await worker.terminate();
@@ -93,20 +93,21 @@ function App() {
         }
         workerRef.current = worker;
         setOcrWorker(worker);
-        setStatusMsg('OCR 引擎已就緒，請選擇付款方式開始掃描');
+        setStatusMsg('引擎就緒，請點選付款方式開啟相機');
       } catch (err) {
-        if (mounted) setStatusMsg('OCR 引擎載入失敗，請重新整理');
+        if (mounted) setStatusMsg('載入失敗，請重新整理');
       }
     })();
     return () => { mounted = false; stopCamera(); };
   }, []);
 
+  // 自動連拍循環 (間隔調低至 1000ms = 1秒)
   useEffect(() => {
     let timer;
     if (isAutoScanMode && cameraActive && !isScanning && sessionActive) {
       timer = setTimeout(() => {
         captureAndScan();
-      }, 1500);
+      }, 1000); 
     }
     return () => clearTimeout(timer);
   }, [isAutoScanMode, cameraActive, isScanning, sessionActive]);
@@ -115,17 +116,17 @@ function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio:false,
-        video:{ facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080} }
+        video:{ facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} }
       });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
         setCameraActive(true);
-        setStatusMsg('相機已啟動，請將金額完整入鏡');
+        setStatusMsg('請將 $ 與數字對準綠色虛線框內');
       }
     } catch (err) {
-      setStatusMsg('無法啟動相機，請允許相機權限');
+      setStatusMsg('相機啟動失敗');
     }
   }
 
@@ -149,110 +150,110 @@ function App() {
     setSessionActive(false);
     setIsAutoScanMode(false);
     stopCamera();
-    setCandidates([]);
   }
 
+  // 核心效能突破點：局部裁切與極致黑白化
   function prepareCanvas() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const scale = Math.min(1.5, 1800 / video.videoWidth);
-    const w = Math.round(video.videoWidth * scale);
-    const h = Math.round(video.videoHeight * scale);
-    canvas.width = w; canvas.height = h;
+    
+    // 只擷取畫面中間的 80% 寬、33% 高 (對應綠色虛線框)
+    const cropW = video.videoWidth * 0.8;
+    const cropH = video.videoHeight * 0.33;
+    const startX = (video.videoWidth - cropW) / 2;
+    const startY = (video.videoHeight - cropH) / 2;
+
+    // 將 Canvas 縮小至裁切尺寸，減少幾十倍的運算量
+    canvas.width = cropW; 
+    canvas.height = cropH;
+    
     const ctx = canvas.getContext('2d', {willReadFrequently:true});
-    ctx.drawImage(video, 0, 0, w, h);
-    const img = ctx.getImageData(0, 0, w, h);
+    ctx.drawImage(video, startX, startY, cropW, cropH, 0, 0, cropW, cropH);
+    
+    // 二值化 (純黑白處理)，讓 Tesseract 不需處理陰影
+    const img = ctx.getImageData(0, 0, cropW, cropH);
     const d = img.data;
     for (let i = 0; i < d.length; i += 4) {
       const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.5 + 128));
-      d[i] = d[i+1] = d[i+2] = enhanced;
+      const color = gray > 140 ? 255 : 0; // 高對比門檻
+      d[i] = d[i+1] = d[i+2] = color;
     }
     ctx.putImageData(img, 0, 0);
-    return canvas.toDataURL('image/png');
+    return canvas.toDataURL('image/jpeg', 0.8);
   }
 
   async function captureAndScan() {
     if (busyRef.current || !videoRef.current || !cameraActive || !workerRef.current) return;
     busyRef.current = true;
     setIsScanning(true);
-    if (!isAutoScanMode) {
-        setCandidates([]);
-    }
     
     try {
       const imageData = prepareCanvas();
       const result = await workerRef.current.recognize(imageData);
       parseOCRData(result?.data?.text || '');
     } catch (err) {
-      setStatusMsg(`辨識錯誤：${err.message}`);
+      setStatusMsg(`辨識錯誤`);
       setIsScanning(false);
     } finally {
       busyRef.current = false;
     }
   }
 
+  // 嚴格過濾 $ 後面的數字
   function parseOCRData(text) {
-    const normalized = text.replace(/[＄﹩]/g, '$').replace(/[，]/g, ',').replace(/[ＯО]/g, '0');
+    // 移除所有空白，並將可能的誤判替換為 $ 
+    const normalized = text.replace(/[＄﹩S5s]/g, '$').replace(/[，,]/g, '').replace(/\s+/g, '');
     
-    // 擷取金額 (>0)
-    const amountMatches = [...normalized.matchAll(/\$\s*([0-9]{1,6}(?:,[0-9]{3})*)/g)];
-    let amounts = [...new Set(amountMatches.map(m => Number(m[1].replace(/,/g,''))).filter(n => Number.isFinite(n) && n > 0))];
+    // 嚴格 Regex：尋找 $ 緊接 1~6 位數字
+    const match = normalized.match(/\$([0-9]{1,6})/);
 
-    // 備用抓取邏輯
-    if (amounts.length === 0) {
-      const lines = normalized.split(/\r?\n/);
-      const totalLine = lines.find(line => /總金額|總金|金額/.test(line));
-      if (totalLine) {
-        const nums = [...totalLine.matchAll(/[S$＄]?\s*([0-9]{2,6})/g)].map(m => Number(m[1])).filter(n => n > 0);
-        if (nums.length) amounts = [...new Set(nums)];
+    if (match) {
+      const amt = Number(match[1]);
+      if (amt > 0) {
+        handleAddRecord(amt);
+        return;
       }
     }
 
-    if (amounts.length === 1) {
-      handleAddRecord(amounts[0]);
-      return;
-    }
-
     if (isAutoScanMode) {
-      setStatusMsg('連拍中：等待清晰金額...');
+      setStatusMsg('連拍中：等待對準 $ 符號...');
       setIsScanning(false);
       return;
     }
 
-    if (amounts.length > 0) {
-      setCandidates(amounts);
-      setStatusMsg(`偵測到多組數字，請點選正確金額`);
-      setIsScanning(false);
-      return;
-    }
-
-    setStatusMsg(`未抓到金額，請重新對焦。`);
+    setStatusMsg(`框內未找到 $ 金額，請重新對焦。`);
     setIsScanning(false);
   }
 
   function handleAddRecord(amount) {
-    const amtNum = parseInt(amount, 10);
-    if (!Number.isFinite(amtNum) || amtNum <= 0) {
-      setStatusMsg('❌ 無效的金額');
-      setIsScanning(false);
-      return;
-    }
-
     const newItem = {
       id: Date.now() + Math.random(),
-      amount: amtNum,
+      amount: amount,
       payMethod: paymentMethod,
       timestamp: new Date().toLocaleTimeString('zh-TW', {hour12:false})
     };
     
     setScannedItems(prev => [newItem, ...prev]);
-    setCandidates([]);
     setManualAmount('');
     setIsScanning(false);
+    
+    // 閃爍特效回饋
     setFlash(true);
-    setTimeout(() => setFlash(false), 400);
-    setStatusMsg(`✅ 成功加入 $${amtNum.toLocaleString()}`);
+    setTimeout(() => setFlash(false), 250);
+    setStatusMsg(`✅ 已加入 $${amount.toLocaleString()}`);
+  }
+
+  // 手機端直接修改金額功能
+  function handleEditAmount(id, currentAmount) {
+    const newAmtStr = window.prompt('請輸入修改後的金額：', currentAmount);
+    if (newAmtStr !== null) {
+      const newAmt = parseInt(newAmtStr, 10);
+      if (Number.isFinite(newAmt) && newAmt > 0) {
+        setScannedItems(prev => prev.map(item => item.id === id ? { ...item, amount: newAmt } : item));
+      } else if (newAmtStr.trim() !== '') {
+        alert('請輸入有效的數字金額！');
+      }
+    }
   }
 
   function handleDelete(id) {
@@ -261,7 +262,6 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col w-full bg-gray-100 overflow-hidden relative">
-      {/* 頂部總計區塊 */}
       <div className={`h-[20vh] bg-blue-600 text-white p-4 shadow-lg z-20 shrink-0 flex flex-col justify-between transition-colors ${flash ? 'flash-active bg-emerald-500' : ''}`}>
         <div className="flex justify-between items-start gap-2">
           <div className="min-w-0">
@@ -287,9 +287,8 @@ function App() {
 
       <div className="h-[80vh] w-full relative min-h-0">
         {!sessionActive ? (
-          // 初始選擇畫面
           <div className="flex flex-col h-full p-4 overflow-y-auto hide-scrollbar">
-            <h2 className="text-gray-700 font-bold mb-3 flex items-center"><CameraIcon/><span className="ml-2">點擊開啟相機進行掃描：</span></h2>
+            <h2 className="text-gray-700 font-bold mb-3 flex items-center"><CameraIcon/><span className="ml-2">點擊開啟相機：</span></h2>
             <div className="flex gap-3 mb-6 shrink-0">
               {['現金','刷卡','LINE PAY'].map(method => (
                 <button key={method} onClick={() => handleStartSession(method)} className="flex-1 py-5 text-base font-black rounded-xl text-white shadow-md bg-blue-600 active:scale-95">{method}</button>
@@ -298,7 +297,7 @@ function App() {
             
             <div className="flex-1 pb-10">
               <h2 className="text-gray-500 font-bold mb-3 flex justify-between items-end gap-2">
-                <span>掃描紀錄總表</span>
+                <span>掃描紀錄總表 (點擊金額可修改)</span>
                 {scannedItems.length > 0 && <button onClick={()=>setScannedItems([])} className="text-red-500 text-xs font-bold px-3 py-1.5 bg-red-50 rounded-md">清除全部</button>}
               </h2>
               {scannedItems.length === 0 ? (
@@ -310,7 +309,12 @@ function App() {
                       <div className="flex items-center gap-4">
                         <div className="text-gray-400 font-bold">#{scannedItems.length - index}</div>
                         <div>
-                          <span className="block font-black text-2xl">${item.amount.toLocaleString()}</span>
+                          <span 
+                            onClick={() => handleEditAmount(item.id, item.amount)}
+                            className="block font-black text-2xl cursor-pointer text-blue-700 underline decoration-dashed decoration-blue-300"
+                          >
+                            ${item.amount.toLocaleString()} <EditIcon/>
+                          </span>
                           <span className="text-xs text-gray-400">{item.payMethod} • {item.timestamp}</span>
                         </div>
                       </div>
@@ -322,48 +326,42 @@ function App() {
             </div>
           </div>
         ) : (
-          // 相機掃描畫面
           <div className="w-full h-full relative bg-black flex flex-col">
             <div className={`video-container flex-1 ${isScanning?'scanning':''}`}>
               <video ref={videoRef} playsInline muted autoPlay></video>
               <div className="scan-line"></div>
               <canvas ref={canvasRef} className="hidden"></canvas>
               
-              {/* 掃描對準框 */}
-              <div className="absolute inset-0 pointer-events-none p-3 overflow-hidden">
-                <div className="w-full h-full border-4 border-dashed border-emerald-400 rounded-xl relative shadow-[0_0_0_4000px_rgba(0,0,0,0.45)]"></div>
+              {/* 精確對準框 - 僅佔畫面中間 1/3，加快處理速度 */}
+              <div className="absolute inset-0 pointer-events-none flex justify-center items-center">
+                <div className="w-[80%] h-[33%] border-4 border-dashed border-emerald-400 rounded-xl relative shadow-[0_0_0_4000px_rgba(0,0,0,0.6)]">
+                  <div className="absolute -top-8 left-0 right-0 text-center">
+                    <span className="text-white text-xs font-black bg-black/80 px-3 py-1.5 rounded-full border border-gray-600">請將 $與金額 置於框內</span>
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* 即時清單 */}
+            {/* 即時清單 (點擊金額可以直接修改) */}
             <div className="absolute top-2 left-2 right-2 max-h-48 overflow-y-auto hide-scrollbar z-30 pointer-events-auto space-y-2">
               {currentSessionItems.slice(0, 5).map((item, index) => (
-                <div key={item.id} className="flex justify-between items-center bg-white/95 p-2 px-4 rounded-lg shadow-lg border-l-4 border-blue-500 animate-slide-up">
-                  <div className="flex items-center gap-3">
+                <div key={item.id} className="flex justify-between items-center bg-white/95 p-3 px-4 rounded-xl shadow-lg border-l-4 border-blue-500 animate-slide-up">
+                  <div className="flex items-center gap-4">
                     <span className="text-gray-400 font-bold text-sm">#{currentSessionItems.length - index}</span>
-                    <span className="text-xl font-black text-gray-800">${item.amount.toLocaleString()}</span>
+                    <span 
+                      onClick={() => handleEditAmount(item.id, item.amount)}
+                      className="text-2xl font-black text-blue-700 cursor-pointer underline decoration-dashed decoration-blue-300"
+                    >
+                      ${item.amount.toLocaleString()} <EditIcon/>
+                    </span>
                   </div>
                   <button onClick={() => handleDelete(item.id)} className="text-red-500 p-2"><TrashIcon/></button>
                 </div>
               ))}
             </div>
 
-            {/* 手動配對視窗 (僅限手動單拍模式下偵測到多組金額時) */}
-            {!isAutoScanMode && candidates.length > 0 && (
-              <div className="absolute top-1/2 left-3 right-3 -translate-y-1/2 bg-white/95 rounded-xl p-4 shadow-2xl z-40">
-                <h3 className="text-sm font-bold text-indigo-800 mb-3 text-center">請選擇正確金額</h3>
-                <div className="flex flex-wrap gap-2 justify-center">
-                  {candidates.map((a,i)=><button key={i} onClick={() => handleAddRecord(a)} className="py-3 px-6 bg-amber-50 text-amber-700 font-black text-lg border border-amber-200 rounded-lg">${a}</button>)}
-                </div>
-                <button onClick={()=>setCandidates([])} className="w-full mt-4 py-2 bg-gray-200 rounded-lg text-sm font-bold">取消</button>
-              </div>
-            )}
-
-            {/* 控制面板 */}
             <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-10 pb-7 z-20 flex flex-col gap-3 justify-center">
-              
-              {/* 快速手動輸入框 (備用) */}
-              <form onSubmit={e => { e.preventDefault(); if (manualAmount) handleAddRecord(manualAmount); }} className="flex gap-2">
+              <form onSubmit={e => { e.preventDefault(); if (manualAmount) handleAddRecord(Number(manualAmount)); }} className="flex gap-2">
                 <input type="number" min="1" value={manualAmount} onChange={e=>setManualAmount(e.target.value)} placeholder="手動輸入金額 $" className="flex-1 px-4 py-3 bg-white/95 border border-gray-300 rounded-xl font-bold"/>
                 <button type="submit" disabled={!manualAmount} className="px-6 py-3 bg-gray-800 text-white font-bold rounded-xl disabled:opacity-50">加入</button>
               </form>
@@ -373,7 +371,7 @@ function App() {
                   onClick={() => setIsAutoScanMode(!isAutoScanMode)} 
                   className={`flex-1 py-4 rounded-xl font-black text-base shadow-lg transition-colors ${isAutoScanMode ? 'bg-amber-500 text-white' : 'bg-gray-800 text-white border border-gray-600'}`}
                 >
-                  {isAutoScanMode ? '⏸ 停止連拍' : '▶️ 自動連拍'}
+                  {isAutoScanMode ? '⏸ 停止連拍' : '▶️ 極速自動連拍'}
                 </button>
 
                 <button 
@@ -381,7 +379,7 @@ function App() {
                   disabled={isAutoScanMode || isScanning || !cameraActive || !ocrWorker} 
                   className={`flex-[2] py-4 rounded-xl font-black text-lg shadow-lg ${isAutoScanMode || isScanning ? 'bg-gray-500 text-gray-300' : 'bg-emerald-500 text-white'}`}
                 >
-                  {isScanning && !isAutoScanMode ? '解析中...' : '📸 點擊單拍'}
+                  {isScanning && !isAutoScanMode ? '擷取中...' : '📸 點擊單拍'}
                 </button>
               </div>
             </div>
