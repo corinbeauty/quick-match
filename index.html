@@ -121,7 +121,7 @@ function App() {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
         setCameraActive(true);
-        setStatusMsg('請將 QR Code 對準左下，金額對準右上綠框');
+        setStatusMsg('請將 QR Code 對準正下方，金額對準右上綠框');
       }
     } catch (err) {
       setStatusMsg('相機啟動失敗');
@@ -331,8 +331,8 @@ function App() {
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center bg-black/40">
                 <div className="relative w-[320px] h-[240px]">
                   
-                  {/* 左下方的 QR Code 提示框 */}
-                  <div className="absolute bottom-4 left-4 w-28 h-28 border-2 border-gray-400 border-dashed rounded flex flex-col items-center justify-center opacity-70">
+                  {/* 正下方的 QR Code 提示框 (已修正位置至 left-1/2 居中對齊) */}
+                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-28 h-28 border-2 border-gray-400 border-dashed rounded flex flex-col items-center justify-center opacity-70">
                     <span className="text-gray-300 font-bold text-sm">對準</span>
                     <span className="text-gray-300 font-bold text-sm">QR Code</span>
                   </div>
