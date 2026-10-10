@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>票券快速掃描累加器</title>
+<title>票券快速掃描累加器 (純金額極速版)</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -14,7 +14,7 @@
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#f3f4f6; margin:0; overscroll-behavior-y:none; }
   .video-container { position:relative; width:100%; height:100%; background:#000; overflow:hidden; }
   video { width:100%; height:100%; object-fit:contain; }
-  .scan-line { position:absolute; top:0; left:0; width:100%; height:2px; background:#10b981; box-shadow:0 0 10px #10b981; animation:scan 2s infinite linear; display:none; pointer-events:none; }
+  .scan-line { position:absolute; top:0; left:0; width:100%; height:2px; background:#10b981; box-shadow:0 0 10px #10b981; animation:scan 1.5s infinite linear; display:none; pointer-events:none; }
   .scanning .scan-line { display:block; }
   @keyframes scan { 0%{top:0} 50%{top:100%} 100%{top:0} }
   .hide-scrollbar::-webkit-scrollbar { display:none; }
@@ -23,8 +23,6 @@
   .flash-active { animation:flash-success .4s ease-out; }
   @keyframes slide-up { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
   .animate-slide-up { animation:slide-up .3s ease-out forwards; }
-  @keyframes fade-in { from{opacity:0} to{opacity:1} }
-  .animate-fade-in { animation:fade-in .2s ease-out forwards; }
 </style>
 </head>
 <body>
@@ -49,23 +47,15 @@ function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [statusMsg, setStatusMsg] = useState('正在載入 OCR 引擎...');
-  const [candidates, setCandidates] = useState({tickets:[], amounts:[]});
-  const [selected, setSelected] = useState({ticket:null, amount:null});
-  const [manualTicket, setManualTicket] = useState('');
+  const [candidates, setCandidates] = useState([]); // 只存金額
   const [manualAmount, setManualAmount] = useState('');
   const [sessionActive, setSessionActive] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('現金');
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [flash, setFlash] = useState(false);
   const [ocrWorker, setOcrWorker] = useState(null);
-  const [ocrText, setOcrText] = useState('');
-  const [ocrConfidence, setOcrConfidence] = useState(null);
-  const [preprocessMode, setPreprocessMode] = useState('灰階增強');
-
-  const [autoScanMode, setAutoScanMode] = useState(false);
-  const autoScanRef = useRef(false);
-  const autoScanTimerRef = useRef(null);
-  const scannedItemsRef = useRef([]);
+  
+  // 自動連拍狀態
+  const [isAutoScanMode, setIsAutoScanMode] = useState(false);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -73,37 +63,29 @@ function App() {
   const workerRef = useRef(null);
   const busyRef = useRef(false);
 
-  useEffect(() => {
-    scannedItemsRef.current = scannedItems;
-  }, [scannedItems]);
-
   const totals = scannedItems.reduce((acc, item) => {
     acc[item.payMethod] = (acc[item.payMethod] || 0) + item.amount;
     return acc;
   }, {'現金':0, '刷卡':0, 'LINE PAY':0});
   const grandTotal = totals['現金'] + totals['刷卡'] + totals['LINE PAY'];
+  
+  const currentSessionItems = scannedItems.filter(item => item.payMethod === paymentMethod);
 
   useEffect(() => {
     let mounted = true;
-    let worker;
     (async () => {
       try {
-        setStatusMsg('正在載入 OCR 核心與英文數字模型...');
-        worker = await Tesseract.createWorker({
+        const worker = await Tesseract.createWorker({
           logger: m => {
             if (!mounted) return;
-            if (m.status === 'loading tesseract core') setStatusMsg('載入 OCR 核心...');
-            else if (m.status === 'loading language traineddata') setStatusMsg('載入英文數字模型...');
-            else if (m.status === 'initializing api') setStatusMsg('初始化 OCR...');
-            else if (m.status === 'recognizing text') setStatusMsg(`正在辨識 ${(m.progress * 100).toFixed(0)}%`);
+            if (m.status === 'recognizing text') setStatusMsg(`正在辨識 ${(m.progress * 100).toFixed(0)}%`);
           }
         });
         await worker.loadLanguage('eng');
         await worker.initialize('eng');
         await worker.setParameters({
           tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$,:.-#',
-          preserve_interword_spaces: '1',
-          tessedit_pageseg_mode: '11'
+          preserve_interword_spaces: '1'
         });
         if (!mounted) {
           await worker.terminate();
@@ -113,48 +95,37 @@ function App() {
         setOcrWorker(worker);
         setStatusMsg('OCR 引擎已就緒，請選擇付款方式開始掃描');
       } catch (err) {
-        console.error('OCR 初始化失敗：', err);
-        if (mounted) setStatusMsg('OCR 引擎載入失敗：請確認網路、重新整理，並使用 HTTPS 網址開啟');
+        if (mounted) setStatusMsg('OCR 引擎載入失敗，請重新整理');
       }
     })();
-
-    return () => {
-      mounted = false;
-      if (autoScanTimerRef.current) clearTimeout(autoScanTimerRef.current);
-      stopCamera();
-      if (workerRef.current) {
-        workerRef.current.terminate();
-        workerRef.current = null;
-      } else if (worker) {
-        worker.terminate();
-      }
-    };
+    return () => { mounted = false; stopCamera(); };
   }, []);
+
+  useEffect(() => {
+    let timer;
+    if (isAutoScanMode && cameraActive && !isScanning && sessionActive) {
+      timer = setTimeout(() => {
+        captureAndScan();
+      }, 1500);
+    }
+    return () => clearTimeout(timer);
+  }, [isAutoScanMode, cameraActive, isScanning, sessionActive]);
 
   async function startCamera() {
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setStatusMsg('此瀏覽器無法使用相機，請使用 HTTPS 網址開啟');
-        return;
-      }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio:false,
-        video:{
-          facingMode:{ideal:'environment'},
-          width:{ideal:1920},
-          height:{ideal:1080}
-        }
+        video:{ facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080} }
       });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
         setCameraActive(true);
-        setStatusMsg('相機已啟動，請讓票券完整入鏡並對焦');
+        setStatusMsg('相機已啟動，請將金額完整入鏡');
       }
     } catch (err) {
-      console.error('相機啟動失敗：', err);
-      setStatusMsg('無法啟動相機，請允許相機權限並使用 HTTPS 網址');
+      setStatusMsg('無法啟動相機，請允許相機權限');
     }
   }
 
@@ -169,235 +140,154 @@ function App() {
   function handleStartSession(method) {
     setPaymentMethod(method);
     setSessionActive(true);
+    setIsAutoScanMode(false);
     setStatusMsg(`正在開啟 ${method} 掃描模式...`);
     startCamera();
   }
 
   function handleEndSession() {
-    stopAutoScan();
     setSessionActive(false);
+    setIsAutoScanMode(false);
     stopCamera();
-    setCandidates({tickets:[], amounts:[]});
-    setSelected({ticket:null, amount:null});
-    setStatusMsg(`已結束 ${paymentMethod} 掃描，可選擇其他付款方式繼續`);
+    setCandidates([]);
   }
-
-  const runAutoScanLoop = async () => {
-    if (!autoScanRef.current) return;
-    if (!busyRef.current && cameraActive && workerRef.current && candidates.tickets.length === 0) {
-      await captureAndScan(true); 
-    }
-    autoScanTimerRef.current = setTimeout(runAutoScanLoop, 1200); 
-  };
-
-  const startAutoScan = () => {
-    setAutoScanMode(true);
-    autoScanRef.current = true;
-    setStatusMsg('啟動【自動連拍掃描】，請連續更換單據...');
-    setIsScanning(true); 
-    runAutoScanLoop();
-  };
-
-  const stopAutoScan = () => {
-    setAutoScanMode(false);
-    autoScanRef.current = false;
-    setIsScanning(false);
-    if (autoScanTimerRef.current) clearTimeout(autoScanTimerRef.current);
-    setStatusMsg('已暫停自動掃描');
-  };
-
-  const toggleAutoScan = () => {
-    if (autoScanMode) stopAutoScan();
-    else startAutoScan();
-  };
 
   function prepareCanvas() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || !video.videoWidth || !video.videoHeight) {
-      throw new Error('相機影像尚未準備好，請稍候再拍');
-    }
-
     const scale = Math.min(1.5, 1800 / video.videoWidth);
     const w = Math.round(video.videoWidth * scale);
     const h = Math.round(video.videoHeight * scale);
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', {willReadFrequently:true});
     ctx.drawImage(video, 0, 0, w, h);
-
     const img = ctx.getImageData(0, 0, w, h);
     const d = img.data;
     for (let i = 0; i < d.length; i += 4) {
       const gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.35 + 128));
+      const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.5 + 128));
       d[i] = d[i+1] = d[i+2] = enhanced;
     }
     ctx.putImageData(img, 0, 0);
     return canvas.toDataURL('image/png');
   }
 
-  async function captureAndScan(isAuto = false) {
-    if (busyRef.current || !videoRef.current || !cameraActive || !workerRef.current) {
-      if (!workerRef.current && !isAuto) setStatusMsg('OCR 引擎尚未就緒，請稍候');
-      return;
-    }
+  async function captureAndScan() {
+    if (busyRef.current || !videoRef.current || !cameraActive || !workerRef.current) return;
     busyRef.current = true;
-    if (!isAuto) {
-      setIsScanning(true);
-      setCandidates({tickets:[], amounts:[]});
-      setSelected({ticket:null, amount:null});
-      setStatusMsg('正在拍照與辨識...');
+    setIsScanning(true);
+    if (!isAutoScanMode) {
+        setCandidates([]);
     }
+    
     try {
       const imageData = prepareCanvas();
       const result = await workerRef.current.recognize(imageData);
-      const text = result?.data?.text || '';
-      if (!isAuto) {
-        setOcrText(text);
-        setOcrConfidence(typeof result?.data?.confidence === 'number' ? result.data.confidence : null);
-        console.log('OCR 原始文字：', JSON.stringify(text));
-      }
-      parseOCRData(text, isAuto);
+      parseOCRData(result?.data?.text || '');
     } catch (err) {
-      console.error('OCR 辨識錯誤：', err);
-      if (!isAuto) setStatusMsg(`辨識發生錯誤：${err?.message || err}`);
+      setStatusMsg(`辨識錯誤：${err.message}`);
+      setIsScanning(false);
     } finally {
       busyRef.current = false;
-      if (!autoScanRef.current && !isAuto) setIsScanning(false);
     }
   }
 
-  function parseOCRData(text, isAuto = false) {
-    const normalized = (text || '')
-      .replace(/[＄﹩]/g, '$')
-      .replace(/[，]/g, ',')
-      .replace(/[ＯО]/g, '0')
-      .replace(/[ＡА]/g, 'A');
-
-    const ticketMatches = [...normalized.matchAll(/\bA\s*([0-9]{2,3})\b/gi)];
-    const tickets = [...new Set(ticketMatches.map(m => 'A' + m[1]))];
-
+  function parseOCRData(text) {
+    const normalized = text.replace(/[＄﹩]/g, '$').replace(/[，]/g, ',').replace(/[ＯО]/g, '0');
+    
+    // 擷取金額 (>0)
     const amountMatches = [...normalized.matchAll(/\$\s*([0-9]{1,6}(?:,[0-9]{3})*)/g)];
-    let amounts = [...new Set(
-      amountMatches.map(m => Number(m[1].replace(/,/g,'')))
-        .filter(n => Number.isFinite(n) && n > 0 && n <= 999999) // 移除 30 限制，改為大於 0
-    )];
+    let amounts = [...new Set(amountMatches.map(m => Number(m[1].replace(/,/g,''))).filter(n => Number.isFinite(n) && n > 0))];
 
+    // 備用抓取邏輯
     if (amounts.length === 0) {
       const lines = normalized.split(/\r?\n/);
       const totalLine = lines.find(line => /總金額|總金|金額/.test(line));
       if (totalLine) {
-        const nums = [...totalLine.matchAll(/[S$＄]?\s*([0-9]{1,6})/g)] // 支援單一數字長度
-          .map(m => Number(m[1]))
-          .filter(n => n > 0 && n <= 999999); // 移除 30 限制，改為大於 0
+        const nums = [...totalLine.matchAll(/[S$＄]?\s*([0-9]{2,6})/g)].map(m => Number(m[1])).filter(n => n > 0);
         if (nums.length) amounts = [...new Set(nums)];
       }
     }
 
-    if (tickets.length === 1 && amounts.length === 1) {
-      handleAddRecord(tickets[0], amounts[0], isAuto);
+    if (amounts.length === 1) {
+      handleAddRecord(amounts[0]);
       return;
     }
 
-    if (tickets.length > 0 || amounts.length > 0) {
-      if (isAuto) stopAutoScan();
-      setCandidates({tickets, amounts});
-      setStatusMsg(`辨識結果：票號 ${tickets.join(', ') || '未找到'}；金額 ${amounts.map(n => '$'+n).join(', ') || '未找到'}。請點選配對。`);
+    if (isAutoScanMode) {
+      setStatusMsg('連拍中：等待清晰金額...');
       setIsScanning(false);
       return;
     }
 
-    if (!isAuto) {
-      setStatusMsg(`未找到票號或金額。OCR 讀取：${normalized.trim().slice(0,100) || '（完全空白）'}；可重新對焦或手動輸入。`);
+    if (amounts.length > 0) {
+      setCandidates(amounts);
+      setStatusMsg(`偵測到多組數字，請點選正確金額`);
       setIsScanning(false);
-    } else {
-      setStatusMsg(`[自動連拍中] 畫面中未找到完整資料，請換下一張...`);
+      return;
     }
+
+    setStatusMsg(`未抓到金額，請重新對焦。`);
+    setIsScanning(false);
   }
 
-  function handleCandidateSelect(type, val) {
-    setSelected(prev => {
-      const next = {...prev, [type]:val};
-      if (next.ticket && next.amount) {
-        handleAddRecord(next.ticket, next.amount, false);
-        return {ticket:null, amount:null};
-      }
-      return next;
-    });
-  }
-
-  function handleAddRecord(ticket, amount, isAuto = false) {
+  function handleAddRecord(amount) {
     const amtNum = parseInt(amount, 10);
-    const normalizedTicket = String(ticket || '手動').trim().toUpperCase();
-    if (!Number.isFinite(amtNum) || amtNum <= 0) { // 移除 30 限制，改為大於 0
-      if (!isAuto) setStatusMsg('⚠️ 金額異常（需大於 0），已取消加入');
-      if (!autoScanRef.current) setIsScanning(false);
+    if (!Number.isFinite(amtNum) || amtNum <= 0) {
+      setStatusMsg('❌ 無效的金額');
+      setIsScanning(false);
       return;
     }
-    
-    if (normalizedTicket !== '手動' && scannedItemsRef.current.some(item => item.ticket.toUpperCase() === normalizedTicket)) {
-      if (!isAuto) setStatusMsg(`❌ 拒絕加入：單號 ${normalizedTicket} 已經存在列表中！`);
-      if (!isAuto) {
-        setCandidates({tickets:[], amounts:[]});
-        setSelected({ticket:null, amount:null});
-        setIsScanning(false);
-      }
-      return;
-    }
+
     const newItem = {
       id: Date.now() + Math.random(),
-      ticket: normalizedTicket || '無票號',
       amount: amtNum,
       payMethod: paymentMethod,
       timestamp: new Date().toLocaleTimeString('zh-TW', {hour12:false})
     };
+    
     setScannedItems(prev => [newItem, ...prev]);
-    setCandidates({tickets:[], amounts:[]});
-    setSelected({ticket:null, amount:null});
-    setManualTicket('');
+    setCandidates([]);
     setManualAmount('');
+    setIsScanning(false);
     setFlash(true);
     setTimeout(() => setFlash(false), 400);
-    setStatusMsg(`✅ 成功加入單號 ${normalizedTicket}（$${amtNum.toLocaleString()}）${autoScanRef.current ? '，繼續自動掃描！' : '，請掃下一張！'}`);
-  }
-
-  function handleManualSubmit(e) {
-    e.preventDefault();
-    if (manualAmount) handleAddRecord(manualTicket || '手動', manualAmount, false);
+    setStatusMsg(`✅ 成功加入 $${amtNum.toLocaleString()}`);
   }
 
   function handleDelete(id) {
     setScannedItems(prev => prev.filter(item => item.id !== id));
   }
 
-  function handleClearAll() {
-    setScannedItems([]);
-    setShowClearConfirm(false);
-    setStatusMsg('已清除所有紀錄，重新開始');
-  }
-
   return (
     <div className="h-screen flex flex-col w-full bg-gray-100 overflow-hidden relative">
+      {/* 頂部總計區塊 */}
       <div className={`h-[20vh] bg-blue-600 text-white p-4 shadow-lg z-20 shrink-0 flex flex-col justify-between transition-colors ${flash ? 'flash-active bg-emerald-500' : ''}`}>
         <div className="flex justify-between items-start gap-2">
           <div className="min-w-0">
-            <h1 className="text-sm md:text-base font-semibold opacity-90 mb-1">{sessionActive ? `正在掃描：${paymentMethod}` : '總累計金額'}</h1>
+            <h1 className="text-sm md:text-base font-semibold opacity-90 mb-1">{sessionActive ? `即時加總：${paymentMethod}` : '總累計金額'}</h1>
             <div className="flex items-baseline space-x-2">
               <span className="text-xl md:text-2xl font-bold">NT$</span>
-              <span className="text-4xl md:text-6xl font-extrabold tracking-tight leading-none">{(sessionActive ? totals[paymentMethod] : grandTotal).toLocaleString()}</span>
+              <span className="text-4xl md:text-6xl font-extrabold tracking-tight leading-none">
+                {(sessionActive ? totals[paymentMethod] : grandTotal).toLocaleString()}
+              </span>
             </div>
           </div>
           <div className="flex flex-col items-end space-y-2 shrink-0">
-            <span className="bg-white/20 px-3 py-1 rounded-full text-xs font-bold">共 {scannedItems.length} 筆</span>
-            {sessionActive && <button onClick={handleEndSession} className="bg-red-500 text-white font-black py-2 px-6 rounded-lg shadow-md border-2 border-red-400">完成</button>}
+            <span className="bg-white/20 px-3 py-1 rounded-full text-xs font-bold">
+              共 {sessionActive ? currentSessionItems.length : scannedItems.length} 筆
+            </span>
+            {sessionActive && (
+              <button onClick={handleEndSession} className="bg-red-500 text-white font-black py-2 px-6 rounded-lg shadow-md border-2 border-red-400">完成</button>
+            )}
           </div>
         </div>
-        <p className="text-xs md:text-sm mt-1 opacity-95 truncate bg-black/20 p-1.5 rounded" aria-live="polite">{statusMsg}</p>
+        <p className="text-xs md:text-sm mt-1 opacity-95 truncate bg-black/20 p-1.5 rounded">{statusMsg}</p>
       </div>
 
       <div className="h-[80vh] w-full relative min-h-0">
         {!sessionActive ? (
+          // 初始選擇畫面
           <div className="flex flex-col h-full p-4 overflow-y-auto hide-scrollbar">
             <h2 className="text-gray-700 font-bold mb-3 flex items-center"><CameraIcon/><span className="ml-2">點擊開啟相機進行掃描：</span></h2>
             <div className="flex gap-3 mb-6 shrink-0">
@@ -405,35 +295,24 @@ function App() {
                 <button key={method} onClick={() => handleStartSession(method)} className="flex-1 py-5 text-base font-black rounded-xl text-white shadow-md bg-blue-600 active:scale-95">{method}</button>
               ))}
             </div>
-
-            <div className="flex justify-between items-center text-sm font-bold bg-white p-4 rounded-xl shadow-sm mb-4 shrink-0 border border-gray-200">
-              <div className="flex flex-col text-orange-600"><span className="opacity-70 text-xs mb-1">現金</span><span className="text-lg">${totals['現金'].toLocaleString()}</span></div>
-              <div className="flex flex-col text-blue-600 border-l border-r border-gray-200 px-4"><span className="opacity-70 text-xs mb-1">刷卡</span><span className="text-lg">${totals['刷卡'].toLocaleString()}</span></div>
-              <div className="flex flex-col text-green-600"><span className="opacity-70 text-xs mb-1">LINE PAY</span><span className="text-lg">${totals['LINE PAY'].toLocaleString()}</span></div>
-            </div>
-
+            
             <div className="flex-1 pb-10">
               <h2 className="text-gray-500 font-bold mb-3 flex justify-between items-end gap-2">
-                <span>掃描紀錄（{scannedItems.length}）</span>
-                {scannedItems.length > 0 && (showClearConfirm ? (
-                  <div className="flex gap-2">
-                    <button onClick={handleClearAll} className="text-white text-xs px-3 py-1.5 bg-red-500 rounded-md font-bold">確定清除？</button>
-                    <button onClick={() => setShowClearConfirm(false)} className="text-gray-700 text-xs px-3 py-1.5 bg-gray-300 rounded-md font-bold">取消</button>
-                  </div>
-                ) : <button onClick={() => setShowClearConfirm(true)} className="text-red-500 text-xs font-bold px-3 py-1.5 bg-red-50 rounded-md border border-red-200">清除全部重來</button>)}
+                <span>掃描紀錄總表</span>
+                {scannedItems.length > 0 && <button onClick={()=>setScannedItems([])} className="text-red-500 text-xs font-bold px-3 py-1.5 bg-red-50 rounded-md">清除全部</button>}
               </h2>
               {scannedItems.length === 0 ? (
-                <div className="text-center py-10 text-gray-400 bg-gray-50 rounded-xl border-2 border-dashed border-gray-300">尚未掃描任何票券</div>
+                <div className="text-center py-10 text-gray-400">尚未掃描任何票券</div>
               ) : (
                 <ul className="space-y-3">
-                  {scannedItems.map(item => (
-                    <li key={item.id} className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border-l-4 border-emerald-500 animate-slide-up">
+                  {scannedItems.map((item, index) => (
+                    <li key={item.id} className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border-l-4 border-emerald-500">
                       <div className="flex items-center gap-4">
-                        <div className="flex flex-col items-center">
-                          <div className="bg-gray-100 text-gray-800 font-black px-3 py-1 rounded-md text-lg">#{item.ticket}</div>
-                          <div className={`text-[10px] px-2 py-0.5 rounded mt-1 font-bold tracking-wider ${item.payMethod==='LINE PAY'?'bg-green-100 text-green-700':item.payMethod==='刷卡'?'bg-blue-100 text-blue-700':'bg-orange-100 text-orange-700'}`}>{item.payMethod}</div>
+                        <div className="text-gray-400 font-bold">#{scannedItems.length - index}</div>
+                        <div>
+                          <span className="block font-black text-2xl">${item.amount.toLocaleString()}</span>
+                          <span className="text-xs text-gray-400">{item.payMethod} • {item.timestamp}</span>
                         </div>
-                        <div><span className="block font-black text-gray-800 text-2xl">${item.amount.toLocaleString()}</span><span className="text-xs text-gray-400">{item.timestamp}</span></div>
                       </div>
                       <button onClick={() => handleDelete(item.id)} className="p-3 bg-gray-50 rounded-full"><TrashIcon/></button>
                     </li>
@@ -443,67 +322,73 @@ function App() {
             </div>
           </div>
         ) : (
+          // 相機掃描畫面
           <div className="w-full h-full relative bg-black flex flex-col">
             <div className={`video-container flex-1 ${isScanning?'scanning':''}`}>
               <video ref={videoRef} playsInline muted autoPlay></video>
               <div className="scan-line"></div>
-              {!cameraActive && <div className="absolute inset-0 flex items-center justify-center bg-gray-900 text-white text-sm"><p>相機啟動中...</p></div>}
               <canvas ref={canvasRef} className="hidden"></canvas>
+              
+              {/* 掃描對準框 */}
               <div className="absolute inset-0 pointer-events-none p-3 overflow-hidden">
-                <div className="w-full h-full border-4 border-dashed border-emerald-400 rounded-xl relative shadow-[0_0_0_4000px_rgba(0,0,0,0.45)]">
-                  <div className="absolute top-5 left-0 right-0 text-center">
-                    <span className="text-emerald-300 text-sm font-black bg-black/70 px-3 py-2 rounded-lg border border-emerald-500/30">請將整張票券放入框內，保持清晰對焦</span>
-                  </div>
-                </div>
+                <div className="w-full h-full border-4 border-dashed border-emerald-400 rounded-xl relative shadow-[0_0_0_4000px_rgba(0,0,0,0.45)]"></div>
               </div>
             </div>
 
-            {(candidates.tickets.length > 0 || candidates.amounts.length > 0) && (
-              <div className="absolute top-3 left-3 right-3 bg-white/95 border-2 border-indigo-300 rounded-xl p-3 shadow-2xl z-30">
-                <h3 className="text-sm font-bold text-indigo-800 mb-3 text-center">請確認票號與金額</h3>
-                <div className="flex gap-3">
-                  <div className="flex-1 min-w-0"><p className="text-xs text-gray-500 mb-2 font-bold">票號</p><div className="flex flex-wrap gap-2">
-                    {candidates.tickets.map((t,i)=><button key={i} onClick={()=>handleCandidateSelect('ticket',t)} className={`text-sm font-bold py-2 px-3 rounded-lg ${selected.ticket===t?'bg-indigo-600 text-white':'bg-indigo-50 border border-indigo-200 text-indigo-700'}`}>{t}</button>)}
-                  </div></div>
-                  <div className="flex-1 min-w-0 border-l pl-3"><p className="text-xs text-gray-500 mb-2 font-bold">金額</p><div className="flex flex-wrap gap-2">
-                    {candidates.amounts.map((a,i)=><button key={i} onClick={()=>handleCandidateSelect('amount',a)} className={`text-sm font-bold py-2 px-3 rounded-lg ${selected.amount===a?'bg-amber-600 text-white':'bg-amber-50 border border-amber-200 text-amber-700'}`}>${a.toLocaleString()}</button>)}
-                  </div></div>
+            {/* 即時清單 */}
+            <div className="absolute top-2 left-2 right-2 max-h-48 overflow-y-auto hide-scrollbar z-30 pointer-events-auto space-y-2">
+              {currentSessionItems.slice(0, 5).map((item, index) => (
+                <div key={item.id} className="flex justify-between items-center bg-white/95 p-2 px-4 rounded-lg shadow-lg border-l-4 border-blue-500 animate-slide-up">
+                  <div className="flex items-center gap-3">
+                    <span className="text-gray-400 font-bold text-sm">#{currentSessionItems.length - index}</span>
+                    <span className="text-xl font-black text-gray-800">${item.amount.toLocaleString()}</span>
+                  </div>
+                  <button onClick={() => handleDelete(item.id)} className="text-red-500 p-2"><TrashIcon/></button>
                 </div>
+              ))}
+            </div>
+
+            {/* 手動配對視窗 (僅限手動單拍模式下偵測到多組金額時) */}
+            {!isAutoScanMode && candidates.length > 0 && (
+              <div className="absolute top-1/2 left-3 right-3 -translate-y-1/2 bg-white/95 rounded-xl p-4 shadow-2xl z-40">
+                <h3 className="text-sm font-bold text-indigo-800 mb-3 text-center">請選擇正確金額</h3>
+                <div className="flex flex-wrap gap-2 justify-center">
+                  {candidates.map((a,i)=><button key={i} onClick={() => handleAddRecord(a)} className="py-3 px-6 bg-amber-50 text-amber-700 font-black text-lg border border-amber-200 rounded-lg">${a}</button>)}
+                </div>
+                <button onClick={()=>setCandidates([])} className="w-full mt-4 py-2 bg-gray-200 rounded-lg text-sm font-bold">取消</button>
               </div>
             )}
 
-            <form onSubmit={handleManualSubmit} className="absolute bottom-28 left-3 right-3 flex gap-2 bg-white/95 p-3 rounded-xl shadow-2xl z-20 border border-gray-200">
-              <input type="text" value={manualTicket} onChange={e=>setManualTicket(e.target.value)} placeholder="票號（例：A03）" className="w-1/3 min-w-0 px-2 py-3 bg-gray-50 border border-gray-300 rounded-lg text-center text-sm font-bold"/>
-              <input type="number" min="1" value={manualAmount} onChange={e=>setManualAmount(e.target.value)} placeholder="金額 $" className="flex-1 min-w-0 px-2 py-3 bg-gray-50 border border-gray-300 rounded-lg text-sm font-bold"/>
-              <button type="submit" disabled={!manualAmount} className="px-4 py-3 bg-gray-800 text-white text-sm font-bold rounded-lg disabled:opacity-50">加入</button>
-            </form>
+            {/* 控制面板 */}
+            <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-10 pb-7 z-20 flex flex-col gap-3 justify-center">
+              
+              {/* 快速手動輸入框 (備用) */}
+              <form onSubmit={e => { e.preventDefault(); if (manualAmount) handleAddRecord(manualAmount); }} className="flex gap-2">
+                <input type="number" min="1" value={manualAmount} onChange={e=>setManualAmount(e.target.value)} placeholder="手動輸入金額 $" className="flex-1 px-4 py-3 bg-white/95 border border-gray-300 rounded-xl font-bold"/>
+                <button type="submit" disabled={!manualAmount} className="px-6 py-3 bg-gray-800 text-white font-bold rounded-xl disabled:opacity-50">加入</button>
+              </form>
 
-            <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-12 pb-7 z-10 flex flex-col items-center gap-3">
-              <div className="flex w-full max-w-sm gap-2">
-                <button onClick={toggleAutoScan} disabled={!cameraActive||!ocrWorker} className={`flex-1 py-4 rounded-2xl font-black shadow-lg flex items-center justify-center transition-all ${autoScanMode ? 'bg-red-500 text-white animate-pulse border-2 border-red-300' : 'bg-white/20 text-white backdrop-blur-md border border-white/30 hover:bg-white/30'}`}>
-                  {autoScanMode ? '⏸ 暫停自動' : '▶️ 自動連拍'}
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => setIsAutoScanMode(!isAutoScanMode)} 
+                  className={`flex-1 py-4 rounded-xl font-black text-base shadow-lg transition-colors ${isAutoScanMode ? 'bg-amber-500 text-white' : 'bg-gray-800 text-white border border-gray-600'}`}
+                >
+                  {isAutoScanMode ? '⏸ 停止連拍' : '▶️ 自動連拍'}
                 </button>
-                <button onClick={() => captureAndScan(false)} disabled={isScanning||!cameraActive||!ocrWorker||autoScanMode} className={`flex-[1.5] flex justify-center items-center py-4 rounded-2xl font-black text-lg shadow-lg ${(isScanning||!cameraActive||!ocrWorker||autoScanMode)?'bg-gray-500 text-gray-300':'bg-emerald-500 text-white border-2 border-emerald-300 hover:bg-emerald-600'}`}>
-                  {isScanning && !autoScanMode ? '解析中...' : <><CameraIcon/><span className="ml-2">手動辨識</span></>}
+
+                <button 
+                  onClick={captureAndScan} 
+                  disabled={isAutoScanMode || isScanning || !cameraActive || !ocrWorker} 
+                  className={`flex-[2] py-4 rounded-xl font-black text-lg shadow-lg ${isAutoScanMode || isScanning ? 'bg-gray-500 text-gray-300' : 'bg-emerald-500 text-white'}`}
+                >
+                  {isScanning && !isAutoScanMode ? '解析中...' : '📸 點擊單拍'}
                 </button>
               </div>
             </div>
+            
           </div>
         )}
       </div>
-
-      {sessionActive && (
-        <div className="fixed bottom-1 right-1 z-40 max-w-[70vw]">
-          <details className="bg-white/95 rounded-lg shadow-lg border border-gray-300 p-2 text-xs">
-            <summary className="font-bold cursor-pointer">OCR 除錯資訊</summary>
-            <div className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words">
-              <p>信心分數：{ocrConfidence===null?'尚無資料':`${ocrConfidence.toFixed(1)}%`}</p>
-              <p>前處理：{preprocessMode}</p>
-              <p>原始文字：{ocrText || '（尚未辨識或結果空白）'}</p>
-            </div>
-          </details>
-        </div>
-      )}
     </div>
   );
 }
